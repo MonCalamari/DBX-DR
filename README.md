@@ -49,22 +49,20 @@ MKII 2,610 · MKI (DRAM) 3,017 · MKI (SRAM) 2,681. Tested on a MKII +Drive UW.
 
 Default sound: PTCH 17 (≈ 74 Hz, about D), DTUN 40, DRIV 50, WARP 40, CUT 45, RES 50, FDBK 70, FTIM 64.
 
-## ⚠️ Please be careful with your ears and speakers
+## A word on volume
 
-These are my first USR machines, and this one is built around a self-oscillating feedback loop.
-It is pushed to the edge on purpose – that is exactly the sound I want and need, so it won't be tamed.
-The output is limited inside the machine, but together with the Machinedrum's resonant filters,
-distortion and your mixer it can still get loud and harsh fast. Start with low volume, turn
-FDBK, RES and DRIV up slowly, and keep an eye on your monitors. Use it at your own risk – the
-GPL license comes without any warranty, and I can't take responsibility for damaged speakers
-or ears.
+This machine is built around a self-oscillating feedback loop and is pushed to the edge on
+purpose – that's the sound I want. In my own playing, even at extreme settings, it has been
+unproblematic on a decent system with a high-cut. Like any resonant, driven synth it can get loud,
+so start at a sensible level and bring FDBK, RES and DRIV up gradually. As usual with open-source
+code, it comes without warranty (GPL).
 
 ## Status & known limitations
 
 This is the first public version, a fresh take on an ambient/drone machine. Known weak spots:
 
-- At extreme settings (high RES and FDBK together) you can still hear some crackling. A simple
-  block-wise limiter catches most of it; I find the rest acceptable for this kind of sound.
+- Rarely, a click can be heard – mostly when an LFO with a square or saw shape makes DRIV, FDBK
+  or RES jump. I find this acceptable for this kind of sound.
 - Comments in the source and tools are in **German**.
 - Tested on hardware so far on a single MKII +Drive UW; on MKI it is certified, not yet played.
 
