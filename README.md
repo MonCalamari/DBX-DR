@@ -49,6 +49,15 @@ MKII 2,610 · MKI (DRAM) 3,017 · MKI (SRAM) 2,681. Tested on a MKII +Drive UW.
 
 Default sound: PTCH 17 (≈ 74 Hz, about D), DTUN 40, DRIV 50, WARP 40, CUT 45, RES 50, FDBK 70, FTIM 64.
 
+## ⚠️ Please be careful with your ears and speakers
+
+These are my first USR machines, and this one is built around a self-oscillating feedback loop.
+The output is limited inside the machine, but together with the Machinedrum's resonant filters,
+distortion and your mixer it can still get loud and harsh fast. Start with low volume, turn
+FDBK, RES and DRIV up slowly, and keep an eye on your monitors. Use it at your own risk – the
+GPL license comes without any warranty, and I can't take responsibility for damaged speakers
+or ears.
+
 ## Status & known limitations
 
 This is the first public version, a fresh take on an ambient/drone machine. Known weak spots:
