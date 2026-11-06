@@ -1,0 +1,6 @@
+[submodule "vendor/MDS"]
+	path = vendor/MDS
+	url = https://github.com/jmamma/MDS.git
+[submodule "vendor/mds-tools"]
+	path = vendor/mds-tools
+	url = https://github.com/jmamma/mds-tools.git

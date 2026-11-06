@@ -1,0 +1,68 @@
+{
+  "id": "de.doerg.drone",
+  "display_name": "DRONE",
+  "category": "DBX",
+  "short_label": "DR",
+  "machine_version": "0.5",
+  "description": "Dark, raw drone: detuned saws, sub, drive, slow warping cluster, ladder filter and a self-oscillating feedback loop (doergbox DRONE principle)",
+  "tonal": true,
+  "retrigger": "continuous",
+  "params": [
+    {
+      "name": "PTCH",
+      "default": 17,
+      "transform": "pitch"
+    },
+    {
+      "name": "DTUN",
+      "default": 40,
+      "transform": "unipolar_q23"
+    },
+    {
+      "name": "DRIV",
+      "default": 50,
+      "transform": "unipolar_square_q23"
+    },
+    {
+      "name": "WARP",
+      "default": 40,
+      "transform": "unipolar_square_q23"
+    },
+    {
+      "name": "CUT",
+      "default": 45,
+      "transform": "raw14"
+    },
+    {
+      "name": "RES",
+      "default": 50,
+      "transform": "unipolar_q23"
+    },
+    {
+      "name": "FDBK",
+      "default": 70,
+      "transform": "raw14"
+    },
+    {
+      "name": "FTIM",
+      "default": 64,
+      "transform": "raw14"
+    }
+  ],
+  "program": {
+    "x_workset_words": 44,
+    "y_workset_words": 44,
+    "relocations": [
+      "MAIN_LOOP",
+      "COPY_LOOP",
+      "DRIFT_LOOP",
+      "PEAK_LOOP"
+    ],
+    "imports": [
+      {
+        "symbol": "TRACK_MEMORY",
+        "abi_symbol": 6
+      }
+    ]
+  }
+}

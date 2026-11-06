@@ -1,0 +1,646 @@
+; DRONE – einstimmiger Drone-Synth für die Machinedrum (MDS 1.1, DSP56303)
+; Prinzip der doergbox-DRONE, Struktur wie machines/drone/model/drone_dsp.py:
+;   3 naive Sägezähne (die 24-Bit-Phase selbst ist der Sägezahn) + Rechteck-Sub
+;   -> kubische Sättigung -> 4-Pol-Ladder (LP24) mit Resonanz (Rückkopplung von y4).
+;   Feedback (ab 0.3): der Eingang des Ladders (nach der Sättigung) läuft über eine Verzögerung
+;   im Spurspeicher phasengedreht zurück in die Sättigung; ab Verstärkung 1 bildet die Schleife
+;   eigene Töne (1/(2*Verzögerung) und ungerade Obertöne) und kämpft mit der Drone.
+;   Koeffizienten reihum in vier Gruppen (Drift+Begrenzer / Tonhöhen / Filter / Pegel+Feedback),
+;   jede alle 4 Blöcke (2,9 ms); Einblenden jeden Block.
+;   Begrenzer: Spitze jedes Blocks (jedes 2. Sample) gemerkt; alle 4 Blöcke: >= 0,9 -> Pegel * 0,8,
+;   sonst langsam zurück (1/64). Verzögerung gleitet 4 Samples alle 4 Blöcke.
+;   Kein Note-Off: TRIG blendet in 16 Blöcken ein, danach hält der Klang (CONTINUOUS RETRIGGER).
+; Halbe Skala: Ladder-Zustände h = y/2. Mischung/Sättigung in x/12.
+;
+; Regler (Y:(r6+1..8)):
+;   1 PTCH pitch   Oszillator-Inkrement P (tonal)
+;   2 DTUN Q23     Verstimmung OSC2 0..100 Cent + Drift 4..64 Cent (Makro, linear)
+;   3 DRIV Q23^2   Drive: Oszillatoren 1..8-fach in die Sättigung (Sub fest 0,6; OSC3 0,9, -1 Oktave)
+;   4 WARP Q23^2   langsame, unregelmäßige Wanderung von OSC2/OSC3 (bis +-3 Halbtöne, ~5 s) und
+;                  der Feedback-Zeit (+-0,35 Oktaven); OSC1 bleibt auf dem Grundton
+;   5 CUT  raw14   Ladder-Cutoff 30 Hz .. ~5 kHz (Grenze G_MAX)
+;   6 RES  Q23     Resonanz 0..3,88 (Pegelausgleich 1 + r/4)
+;   7 FDBK raw14   Feedback 0..1,5 phasengedreht (> 1 schwingt die Schleife sich auf),
+;                  blendet die Oszillatoren bis auf 40 % zurück
+;   8 FTIM raw14   Feedback-Verzögerung 34 .. 1 ms
+;
+; Speicher (relativ zu R6):
+;   X 0..14   Tabelle, pro Sample einmal reihum gelesen (R0, Modulo 15)
+;   X 48..60  Intervalltabelle (Halbtöne/384)
+;   Y 9..25   Zustände und Zwischenwerte (siehe equ)
+;   Y 32..39  Ring (R4/R5, Modulo 8): h4, p0, p1, p2, pS, h1, h2, h3
+;   Y 40..43  WARP-Wanderung und Ziele
+
+ACT     equ     9               ; Y: 0 = still (vor dem ersten Trig)
+ENV     equ     10              ; Y: Einblend-Hüllkurve 0..1
+BASE    equ     11              ; Y: Anfang des eigenen Spurspeichers
+WP      equ     12              ; Y: Schreibzeiger (absolut)
+DLY     equ     13              ; Y: Verzögerung in Samples (ganzzahlig)
+WRIT    equ     14              ; Y: seit INIT beschriebene Wörter (bis 1536)
+DR      equ     16              ; Y: Drift 16..18
+DRT     equ     19              ; Y: Driftziele 19..21
+RND     equ     22              ; Y: Zufallsgenerator
+DET     equ     23              ; Y: Verstimmung (Oktaven/32)
+DC      equ     24              ; Y: Drifttiefe (Oktaven/32)
+ENDA    equ     25              ; Y: BASE + 1536
+ROT     equ     26              ; Y: welche Gruppe in diesem Block (0..3)
+GRES    equ     27              ; Y: Ausgangspegel ohne Hüllkurve
+DTGT    equ     28              ; Y: Zielverzögerung
+LIM     equ     29              ; Y: Begrenzer-Pegel 0..1
+PKM     equ     30              ; Y: höchste Spitze seit der letzten Regelung
+RING    equ     32              ; Y: Ring 32..39
+W       equ     40              ; Y: WARP-Wanderung OSC2, OSC3 (40, 41), Ziele 42, 43
+; Tabelle in X, Reihenfolge = Lesereihenfolge in der Schleife
+T_INC0  equ     0
+T_INC1  equ     1
+T_INC2  equ     2
+T_INCS  equ     3
+T_G0    equ     4
+T_G1    equ     5
+T_G2    equ     6
+T_GS    equ     7
+T_MRK   equ     8               ; -Resonanz/6
+T_FK    equ     9               ; Feedback/6 (negativ)
+T_C34   equ     10              ; 3/4
+T_CM14  equ     11              ; -1/4
+T_OMG   equ     12              ; 1 - g
+T_G     equ     13              ; g
+T_GOUT  equ     14              ; Ausgangspegel/4
+T_LEN   equ     15
+
+MEMLEN  equ     1536
+K_DET   equ     $005555         ; 100 Cent/1200/32 (mal DTUN)
+K_DC0   equ     $00036A         ; Drift 4 Cent/1200/32
+K_DC1   equ     $003333         ;      +60 Cent/1200/32 (mal DTUN)
+K_WRATE equ     $0013A9         ; WARP: Wanderung folgt dem Ziel mit 0,0006 alle 4 Blöcke (~5 s)
+W_MASK  equ     $FFE000         ;       neues Ziel mit 1/2048 je 4 Blöcke (~6 s)
+K_WT    equ     $016666         ;       Feedback-Zeit +-0,35 Oktaven/32
+K_DRFT  equ     $020C4A         ; Drift folgt dem Ziel mit 0,016 alle 4 Blöcke
+M16     equ     $F80000         ; -1/16 (= -2 Oktaven/32)
+C_C0    equ     $E08503         ; CUT: log2(2*pi*30/fs)/32
+C_CC    equ     $203C4F         ;      log2(8000/30)/32
+C_GMAX  equ     $FE5700         ;      log2(0,75)/32 (Obergrenze von g)
+K_RES   equ     $52C5F9         ; 3,88/6
+K_OUT0  equ     $133333         ; Ausgang 0,15 ... (0.4: -6 dB Reserve für MD-Filter mit hoher Q)
+K_OUTR  equ     $129FBE         ;   * (1 + r/4): 0,15*0,97
+K_DRVC  equ     $CCCCCD         ;   * (1 - 0,4 DRIV^2)
+LIM_THR equ     $733333         ; Begrenzer: Schwelle 0,9
+LIM_ATK equ     $666666         ;   * 0,8 (alle 4 Blöcke)
+LIM_RLS equ     $020000         ;   zurück mit 1/64 alle 4 Blöcke
+K_FB    equ     $200000         ; 1,5/6 (Feedback, phasengedreht)
+K_FBX   equ     $4CCCCD         ; FDBK blendet die Oszillatoren bis auf 40 % zurück
+C_D0    equ     $FE33F7         ; Verzögerung: log2(1500/2048)/32
+C_DT    equ     $EBA27E         ;              -log2(1500/44)/32
+NOISE_K equ     $19660D         ; Zufall: s = s * 1664525 mod 2^24
+X2_C0   equ     $3FFDC6         ; 2^f/2 = C0 + f(C1 + f(C2 + f C3)), 0 <= f < 1
+X2_C1   equ     $2C8E0A
+X2_C2   equ     $0E74AF
+X2_C3   equ     $04FB0B
+
+        section DRONE
+
+; ---------------------------------------------------------------------------
+INIT:
+        movec   #>$ffffff,m6
+        clr     a                       ; X/Y 9..43 löschen (Y 0..8 gehört der Firmware)
+        move    r6,b
+        add     #ACT,b
+        move    b1,r0
+        rep     #W+4-ACT
+        move    a,l:(r0)+
+        ; eigener Spurspeicher: Basis + 1536 * Spur
+        move    r1,a
+        move    a1,x0
+        asl     a
+        add     x0,a
+        asl     #9,a,a
+TRACK_MEMORY:
+        move    #>$000000,x0            ; Symbol 6: Spurspeicher von Spur 0
+        add     x0,a
+        move    a1,y:(r6+BASE)
+        move    a1,y:(r6+WP)
+        move    #>MEMLEN,x0
+        add     x0,a
+        move    a1,y:(r6+ENDA)
+        move    #>1500,x0
+        move    x0,y:(r6+DLY)
+        move    x0,y:(r6+DTGT)
+        move    #>$5a5a5b,x0            ; ungerader Startwert
+        move    x0,y:(r6+RND)
+        move    #>$D47AE1,x0            ; Startphasen OSC2/OSC3 versetzt
+        move    x0,y:(r6+RING+2)
+        move    #>$2B851F,x0
+        move    x0,y:(r6+RING+3)
+        move    #>$7fffff,x0
+        move    x0,y:(r6+LIM)
+        ; feste Tabellenwerte (G0..GS kommen mit DRIV aus Gruppe 3)
+        move    #>$600000,x0
+        move    x0,x:(r6+T_C34)
+        move    #>$E00000,x0
+        move    x0,x:(r6+T_CM14)
+        rts
+
+; TRIG: nur einschalten; ENV blendet vom aktuellen Pegel aus ein (kein Sprung)
+TRIG:
+        move    #>1,x0
+        move    x0,y:(r6+ACT)
+        rts
+
+; ---------------------------------------------------------------------------
+RENDER:
+        movec   #>$ffffff,m6
+        move    y:(r6+ACT),a
+        tst     a
+        beq     >SILENCE
+        ; reihum eine Gruppe von Koeffizienten (spart Rechenzeit und Programmabrufe)
+        move    y:(r6+ROT),b
+        move    b1,a
+        add     #1,a
+        and     #3,a
+        move    a1,y:(r6+ROT)
+        tst     b
+        bne     <ROT1
+        bsr     >SL_DRIFT
+        bra     <R_DONE
+ROT1:
+        sub     #1,b
+        bne     <ROT2
+        bsr     >SL_OSC
+        bra     <R_DONE
+ROT2:
+        sub     #1,b
+        bne     <ROT3
+        bsr     >SL_CUT
+        bra     <R_DONE
+ROT3:
+        bsr     >SL_LVL
+R_DONE:
+        ; jeden Block: Ausgangspegel = GRES * ENV * LIM, danach ENV += 1/16 (höchstens 1)
+        move    y:(r6+GRES),x0
+        move    y:(r6+ENV),y0
+        mpy     x0,y0,b
+        move    #>$080000,x0
+        move    y0,a
+        add     x0,a
+        move    b,x0
+        move    y:(r6+LIM),y0
+        mpy     x0,y0,b
+        move    b,x:(r6+T_GOUT)
+        move    a,y:(r6+ENV)            ; beim Speichern auf 1 begrenzt
+
+        ; Feedback lesen: 32 Wörter ab WP - DLY nach Y:(R7), nur beschriebenen Speicher
+        move    y:(r6+WRIT),a
+        move    y:(r6+DLY),x0
+        cmp     x0,a
+        blt     <FB_ZERO
+        move    y:(r6+WP),a
+        sub     x0,a
+        move    y:(r6+BASE),x0
+        cmp     x0,a
+        bge     <FB_NOWRAP
+        move    #>MEMLEN,x0
+        add     x0,a
+FB_NOWRAP:
+        move    a1,r2
+        move    y:(r6+ENDA),b
+        sub     a,b                     ; Wörter bis zum Ende
+        move    #>32,x0
+        cmp     x0,b
+        blt     <FB_SPLIT
+        bsr     >COPY
+        bra     <FB_DONE
+FB_SPLIT:
+        move    b1,x0
+        bsr     >COPY
+        move    y:(r6+BASE),r2
+        move    #>32,a
+        sub     x0,a
+        move    a1,x0
+        bsr     >COPY
+        bra     <FB_DONE
+FB_ZERO:
+        clr     a
+        rep     #32
+        move    a,y:(r7)+
+FB_DONE:
+
+        ; Zeiger für die Schleife
+        move    r6,r0                   ; Tabelle
+        movec   #T_LEN-1,m0
+        move    #RING+1,n6
+        lua     (r6)+n6,r4              ; p0
+        move    #RING,n6
+        lua     (r6)+n6,r5              ; h4
+        movec   #7,m4
+        movec   #7,m5
+        move    #>$FFFFFD,n4
+        move    #6,n5
+        move    y:(r6+WP),r1            ; Spurspeicher schreiben
+MAIN_LOOP:
+        do      #32,MAIN_END
+        ; Phasen += Inkremente (24 Bit, laufen über = Sägezahn)
+        move    x:(r0)+,x0      y:(r4)+,a       ; inc0, p0
+        move    x:(r0)+,x1      y:(r4)-,b       ; inc1, p1
+        add     x0,a            x:(r0)+,x0      ; p0', inc2
+        add     x1,b            x:(r0)+,x1      ; p1', incS
+        move    a1,y:(r4)+
+        move    b1,y:(r4)+
+        move    y:(r4)+,a                       ; p2
+        move    y:(r4)-,b                       ; pS
+        add     x0,a
+        add     x1,b
+        move    a1,y:(r4)+
+        move    b1,y:(r4)+n4                    ; zurück auf p0
+        ; Mischung (x/12)
+        move    x:(r0)+,x0      y:(r4)+,y0      ; G0, p0
+        mpy     x0,y0,a         x:(r0)+,x0      y:(r4)+,y0      ; G1, p1
+        mac     x0,y0,a         x:(r0)+,x0      y:(r4)+,y0      ; G2, p2
+        mac     x0,y0,a         x:(r0)+,x0      y:(r4)+,b       ; GS, pS
+        asl     #8,b,b
+        move    x:(r0)+,x1      y:(r5)+n5,y1    ; -Rk, h4 (alt)
+        mac     x1,y1,a         x:(r0)+,x1      y:(r7),y1       ; Fk, Feedback
+        mac     x1,y1,a         b,y0                            ; Sub-Rechteck (begrenzt)
+        mac     x0,y0,a         x:(r0)+,x1      ; 3/4
+        ; Sättigung: u = x/1,5 auf +-1, in/2 = u(3/4 - u^2/4)
+        asl     #3,a,a
+        move    x:(r0)+,x0      a,y0            ; -1/4, u (begrenzt)
+        mpy     y0,y0,a
+        tfr     x1,b
+        move    a,y1
+        mac     x0,y1,b         x:(r0)+,x0      ; 1-g
+        move    x:(r0)+,y1                      ; g
+        move    b,x1
+        mpy     x1,y0,a
+        nop
+        move    a,x1            y:(r4),y0       ; in/2, h1
+        ; Ladder: h = (1-g)h + g*Eingang, 4 Stufen
+        mpy     x0,y0,a         x1,x:(r1)+      ; Feedback-Abgriff vor dem Filter (in/2)
+        macr    y1,x1,a         y:(r5)+,y0      ; h1', h2
+        mpy     x0,y0,b
+        move    a,x1            a,y:(r4)+
+        macr    y1,x1,b         y:(r5)+,y0      ; h2', h3
+        mpy     x0,y0,a
+        move    b,x1            b,y:(r4)+
+        macr    y1,x1,a         y:(r5),y0       ; h3', h4
+        mpy     x0,y0,b
+        move    a,x1            a,y:(r4)+
+        macr    y1,x1,b         x:(r0)+,x0      ; h4', Ausgangspegel
+        nop
+        move    b,x1            b,y:(r4)+
+        mpy     x0,x1,a                         ; Ausgang
+        asl     #2,a,a
+        nop
+        move    a,y:(r7)+
+MAIN_END:
+
+        ; Begrenzer: Spitze des Blocks, jedes zweite Sample (R7 steht wieder am Anfang)
+        clr     b
+        move    #2,n7
+        nop
+        move    y:(r7)+n7,x0
+PEAK_LOOP:
+        do      #8,PEAK_END
+        cmpm    x0,b            y:(r7)+n7,x1
+        tlt     x0,b
+        cmpm    x1,b            y:(r7)+n7,x0
+        tlt     x1,b
+PEAK_END:
+        move    y:(r6+PKM),x0           ; Spitze merken, geregelt wird in Gruppe 0
+        cmpm    x0,b
+        tlt     x0,b
+        move    b1,y:(r6+PKM)
+
+        ; Schreibzeiger weiter (blockweise, läuft nie mitten im Block über)
+        move    r1,a
+        move    y:(r6+ENDA),x0
+        cmp     x0,a
+        blt     <WP_OK
+        move    y:(r6+BASE),a
+WP_OK:
+        move    a1,y:(r6+WP)
+        move    y:(r6+WRIT),a
+        move    #>MEMLEN,x0
+        cmp     x0,a
+        bge     <W_FULL
+        add     #32,a
+        move    a1,y:(r6+WRIT)
+W_FULL:
+        movec   #>$ffffff,m0
+        movec   #>$ffffff,m4
+        movec   #>$ffffff,m5
+        rts
+
+SILENCE:
+        clr     a
+        rep     #32
+        move    a,y:(r7)+
+        rts
+
+; ---------------------------------------------------------------------------
+; Gruppe 1: DTUN und die drei Oszillator-Inkremente
+SL_OSC:
+        ; DTUN (linear): Verstimmung bis 1 Halbton, Drift 4..64 Cent
+        move    y:(r6+2),y0
+        move    #>K_DET,x0
+        mpy     x0,y0,a
+        move    #>K_DC1,x0
+        move    a,y:(r6+DET)
+        mpy     x0,y0,b
+        move    #>K_DC0,x0
+        add     x0,b
+        move    b,y:(r6+DC)
+
+        ; OSC1: 2^(dr0*dc - 2)
+        move    y:(r6+DR),y0
+        move    b,x0
+        mpy     x0,y0,a
+        move    #>M16,x0
+        add     x0,a
+        bsr     >EXP2
+        bsr     >TO_INC
+        move    a,x:(r6+T_INC0)
+        move    a,b
+        asr     b
+        move    b,x:(r6+T_INCS)         ; Sub eine Oktave tiefer
+        ; OSC2: 2^(det + dr1*dc + warp - 2)
+        move    y:(r6+4),x1             ; WARP^2 * W0 * 0,25 Oktaven
+        move    y:(r6+W),y1
+        mpy     x1,y1,a
+        asr     #7,a,a
+        move    y:(r6+DR+1),y0
+        move    y:(r6+DC),x0
+        mac     x0,y0,a
+        move    y:(r6+DET),x0
+        add     x0,a
+        move    #>M16,x0
+        add     x0,a
+        bsr     >EXP2
+        bsr     >TO_INC
+        move    a,x:(r6+T_INC1)
+        ; OSC3: 2^(-1 - det/2 + dr2*dc + warp - 2), Grundlage eine Oktave tiefer
+        move    y:(r6+4),x1             ; WARP^2 * W1 * 0,25 Oktaven
+        move    y:(r6+W+1),y1
+        mpy     x1,y1,a
+        asr     #7,a,a
+        move    #>$FC0000,x0
+        add     x0,a
+        move    y:(r6+DET),b
+        asr     b
+        sub     b,a
+        move    y:(r6+DR+2),y0
+        move    y:(r6+DC),x0
+        mac     x0,y0,a
+        move    #>M16,x0
+        add     x0,a
+        bsr     >EXP2
+        bsr     >TO_INC
+        move    a,x:(r6+T_INC2)
+
+        rts
+
+; Gruppe 2: CUT -> g, 1-g
+SL_CUT:
+        ; CUT
+        move    y:(r6+5),b
+        asl     #9,b,b
+        move    b1,x0
+        move    #>C_CC,y0
+        mpy     x0,y0,a
+        move    #>C_C0,x0
+        add     x0,a
+        move    #>C_GMAX,x0
+        cmp     x0,a
+        tgt     x0,a
+        bsr     >EXP2
+        move    a1,x:(r6+T_G)
+        move    a1,x0
+        move    #>$7fffff,a
+        sub     x0,a
+        move    a1,x:(r6+T_OMG)
+
+        rts
+
+; Gruppe 3: RES, Ausgangspegel ohne Hüllkurve, DRIV, FDBK, FTIM
+SL_LVL:
+        move    y:(r6+6),x0
+        move    #>K_RES,y0
+        mpy     -x0,y0,a
+        move    #>K_OUTR,y0
+        move    a,x:(r6+T_MRK)
+        mpy     x0,y0,b
+        move    #>K_OUT0,x0
+        add     x0,b                    ; B = 0,3 (1 + r/4)
+        ; DRIV (quadratisch): Ausgang * (1 - 0,4 DRIV^2)
+        move    y:(r6+3),x1
+        move    #>$7fffff,a
+        move    #>K_DRVC,y0
+        mac     x1,y0,a
+        move    a,y0
+        move    b,x0
+        mpy     x0,y0,b
+        move    b,y:(r6+GRES)
+        ; FDBK: c = 1-(1-t)^2, Feedback -1,5c (phasengedreht), Oszillatoren * (1 - 0,6c)
+        move    y:(r6+7),a
+        asl     #9,a,a
+        move    a1,x0
+        move    #>$7fffff,b
+        sub     x0,b
+        move    b,x0
+        mpy     x0,x0,b
+        move    #>$7fffff,a
+        sub     b,a
+        move    a,x0                    ; c
+        move    #>K_FB,y0
+        mpy     -x0,y0,a
+        move    #>K_FBX,y0
+        move    a,x:(r6+T_FK)
+        move    #>$7fffff,a
+        mac     -x0,y0,a
+        move    a,y1                    ; Oszillatoren-Anteil
+        ; Mischpegel G = (G1fach + 7 G1fach DRIV^2) * (1 - 0,6c)
+        move    #>$380000,x0            ; OSC1 0,75/12
+        mpy     x0,x1,a
+        move    #>$080000,x0
+        add     x0,a
+        move    a,x0
+        mpy     x0,y1,a
+        move    a,x:(r6+T_G0)
+        move    #>$2CCCCD,x0            ; OSC2 0,75*0,8/12
+        mpy     x0,x1,a
+        move    #>$066666,x0
+        add     x0,a
+        move    a,x0
+        mpy     x0,y1,a
+        move    a,x:(r6+T_G1)
+        move    #>$326666,x0            ; OSC3 0,75*0,9/12
+        mpy     x0,x1,a
+        move    #>$073333,x0
+        add     x0,a
+        move    a,x0
+        mpy     x0,y1,a
+        move    a,x:(r6+T_G2)
+        move    #>$21999A,x0            ; Sub 0,75*0,6/12
+        mpy     x0,x1,a
+        move    #>$04CCCD,x0
+        add     x0,a
+        move    a,x0
+        mpy     x0,y1,a
+        move    a,x:(r6+T_GS)
+        ; FTIM: Verzögerung 1500*2^(-5,09 t) = 34 .. 1 ms
+        move    y:(r6+8),a
+        asl     #9,a,a
+        move    a1,x1
+        move    #>C_DT,y0
+        mpy     x1,y0,a
+        move    #>C_D0,x0
+        add     x0,a
+        move    y:(r6+4),x1             ; WARP: Feedback-Zeit wandert mit (bis +-0,35 Oktaven)
+        move    y:(r6+W),y1
+        mpy     x1,y1,b
+        move    b,x1
+        move    #>K_WT,y1
+        mac     x1,y1,a
+        cmp     x0,a                    ; höchstens 1500 Samples
+        tgt     x0,a
+        bsr     >EXP2
+        asr     #12,a,a                 ; A1 = Zielverzögerung in Samples
+        move    a1,y:(r6+DTGT)
+        rts
+
+; ---------------------------------------------------------------------------
+; X0 Wörter aus dem Spurspeicher (R2) nach Y:(R7) kopieren, X0 >= 1
+; (kurz gehalten: auf MKI kostet jedes Programmwort beim ersten Abruf bis zu 8 Takte)
+COPY:
+COPY_LOOP:
+        do      x0,COPY_END
+        move    x:(r2)+,x1
+        move    x1,y:(r7)+
+COPY_END:
+        rts
+
+; ---------------------------------------------------------------------------
+; Gruppe 0: Drift, WARP-Wanderung, Begrenzer-Regelung, Verzögerung gleitet 4 Samples zum Ziel (alles ohne EXP2)
+SL_DRIFT:
+        move    #DR,n6                  ; Drift der drei Oszillatoren
+        lua     (r6)+n6,r4
+        move    #3,n4
+        move    #>$F80000,n0
+        move    #>K_DRFT,n1
+        move    #3,n2
+        bsr     >DRIFT
+        move    #W,n6                   ; WARP: langsame Wanderung OSC2, OSC3
+        lua     (r6)+n6,r4
+        move    #2,n4
+        move    #>W_MASK,n0
+        move    #>K_WRATE,n1
+        move    #2,n2
+        bsr     >DRIFT
+        ; Begrenzer: höchste Spitze der letzten 4 Blöcke
+        move    y:(r6+PKM),b
+        clr     a
+        move    a,y:(r6+PKM)
+        move    y:(r6+LIM),a
+        move    #>LIM_THR,x0
+        cmpm    x0,b
+        blt     <LIM_UP
+        move    a,x0
+        move    #>LIM_ATK,y0
+        mpy     x0,y0,a
+        bra     <LIM_SET
+LIM_UP:
+        move    #>$7fffff,b
+        sub     a,b
+        move    b,x0
+        move    #>LIM_RLS,y0
+        mac     x0,y0,a
+LIM_SET:
+        move    a,y:(r6+LIM)
+        ; Verzögerung: höchstens 4 Samples Richtung Ziel
+        move    y:(r6+DTGT),a
+        move    y:(r6+DLY),x0
+        sub     x0,a
+        move    #>4,x1
+        cmp     x1,a
+        tgt     x1,a
+        move    #>-4,x1
+        cmp     x1,a
+        tlt     x1,a
+        add     x0,a
+        move    a1,y:(r6+DLY)
+        rts
+
+; Wandernde Werte (Drift und WARP): selten ein neues Zufallsziel, Wert += Tempo (Ziel - Wert).
+; R4 = erster Wert, N4 = Abstand zu den Zielen, N0 = Maske (Wahrscheinlichkeit), N1 = Tempo, N2 = Anzahl
+DRIFT:
+DRIFT_LOOP:
+        do      n2,DRIFT_END
+        bsr     <RAND
+        move    n0,x0
+        and     x0,a
+        tst     a
+        bne     <DR_KEEP
+        bsr     <RAND
+        move    a1,y:(r4+n4)            ; neues Ziel
+DR_KEEP:
+        move    y:(r4+n4),a
+        move    y:(r4),x0
+        sub     x0,a
+        move    a,x0
+        move    n1,y0
+        mpy     x0,y0,a
+        move    y:(r4),x0
+        add     x0,a
+        move    a,y:(r4)+
+        nop
+DRIFT_END:
+        rts
+
+; A1 = neuer Zufallswert (s = s * 1664525 mod 2^24). Benutzt A, X1, Y0.
+RAND:
+        move    y:(r6+RND),y0
+        move    #>NOISE_K,x1
+        mpy     x1,y0,a
+        asr     a
+        move    a0,y:(r6+RND)
+        move    a0,a
+        rts
+
+; ---------------------------------------------------------------------------
+; A = 32 * P * f (Phaseninkrement), f in A1 (Q23); beim Speichern begrenzt
+TO_INC:
+        move    a1,y0
+        move    y:(r6+1),x0
+        mpy     x0,y0,a
+        asl     #5,a,a
+        rts
+
+; ---------------------------------------------------------------------------
+; A1 = 2^E für E/32 in A1, E < 0. Ergebnis Q23 in A1. Benutzt A, B, X0, X1, Y0, Y1.
+; (aus der KICK2 / DBX-K2)
+EXP2:
+        asl     #5,a,a                  ; A = E; Einerstelle ist Bit 47 (oberstes Bit von A1)
+        tfr     a,b
+        asr     #23,b,b                 ; B1 = n = ganzzahliger Teil (abgerundet)
+        move    b1,b                    ; B0 (Nachkommabits) löschen, sonst rundet NEG falsch
+        move    #>$7fffff,x0
+        and     x0,a                    ; A1 = f = Bruchteil, 0 <= f < 1
+        move    a1,y0
+        move    #>X2_C3,x1
+        mpy     y0,x1,a
+        move    #>X2_C2,x1
+        add     x1,a
+        move    a,x1
+        mpy     y0,x1,a
+        move    #>X2_C1,x1
+        add     x1,a
+        move    a,x1
+        mpy     y0,x1,a
+        move    #>X2_C0,x1
+        add     x1,a                    ; A = 2^f/2
+        add     #1,b                    ; Ergebnis = A * 2^(n+1), n+1 <= 0
+        neg     b
+        move    b1,y1
+        asr     y1,a,a
+        rts
+
+        endsec
