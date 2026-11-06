@@ -77,33 +77,6 @@ wrote the DSP56303 code, the Python model and the tooling, and ran the certifica
 follows the principle, not the exact original: the feedback loop sits in front of the filter here,
 and WARP is new.
 
-## Installation
-
-Download the files from the [Releases](../../releases) page:
-
-- `drone-<version>.syx` – ready to send.
-- `drone-<version>.mds` – the certified package.
-
-On the Machinedrum, open the **Machine Manager**, select the USR slot you want and press
-**RECEIVE**. The slot number stored in the file is only a suggestion; the device places the
-machine where you choose.
-
-The transfer works best when every message is acknowledged before the next one is sent – the
-Machinedrum answers with WAIT while it writes to flash. `tools/mds_send.py` does exactly that
-(Linux, ALSA raw MIDI, no extra packages):
-
-```sh
-python3 tools/mds_send.py send drone-0.5.mds      # or the .syx
-```
-
-With a plain SysEx tool, leave a pause between the messages, e.g. `amidi -s drone-0.5.syx -i 300`.
-Sending everything in one go made my +Drive report "Flash Congestion" once.
-
-A failed transfer never replaces the machine already installed in a slot.
-
-As jmamma points out: only install MDS machines from developers you trust – machine code runs
-directly on the DSP.
-
 ## Repository layout
 
 | Path | Content |
@@ -117,33 +90,6 @@ directly on the DSP.
 | `tools/render/` | `mds-render`: runs a `.mds` in the certifier's DSP emulator and writes a WAV |
 | `tools/compare_drone.py` | Compares the emulated DSP code with the Python model |
 | `vendor/MDS`, `vendor/mds-tools` | jmamma's specification and tools (git submodules) |
-
-## Building
-
-Tested on Fedora Linux. You need Python 3.10+, CMake, a C++17 compiler, `patch` and Wine.
-
-1. Clone with submodules:
-   `git clone --recurse-submodules https://github.com/MonCalamari/DBX-DR.git`
-2. Assembler: install NXP **Symphony Studio** (Windows installer, contains `asm56300.exe`
-   and `cldlod.exe`) under Wine. It is proprietary and not part of this repository.
-   `tools/mds_build.py` looks for it in the Wine prefix `~/dsp-tools/wine-symphony`;
-   override with `MDS_WINEPREFIX` or `MDS_DSP_TOOLS`.
-   `python3 tools/mds_build.py --verify` checks the toolchain against jmamma's example
-   machines (all must be byte-identical).
-3. Certifier (on Linux, the emulator build needs two extra include paths):
-   ```sh
-   cmake -S vendor/mds-tools -B vendor/mds-tools/build -DCMAKE_BUILD_TYPE=Release \
-         -DCMAKE_CXX_FLAGS="-I$PWD/vendor/mds-tools/external/dsp56300/source"
-   cmake --build vendor/mds-tools/build -j"$(nproc)"   # stops at vtuneSdk the first time
-   ln -sfn "$PWD/vendor/mds-tools/external/dsp56300/source/vtuneSdk" \
-           vendor/mds-tools/build/certifier/dsp56300/source/vtuneSdk
-   cmake --build vendor/mds-tools/build -j"$(nproc)"
-   ```
-4. Build and certify (takes a while): `python3 tools/mds_build.py machines/drone --certify`
-   → `build/drone/` (`.mds`, `.syx`, certifier report)
-5. Optional, to listen without hardware: `tools/render/build.sh`, then
-   `tools/render/mds-render build/drone/drone.mds out.wav -s 30 -t 1000 -p 3=127`
-   (parameter index = value; `-c 5` lists the five most expensive blocks).
 
 ## How it works (short)
 
