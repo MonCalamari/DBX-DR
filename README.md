@@ -25,6 +25,8 @@ MKII 2,610 · MKI (DRAM) 3,017 · MKI (SRAM) 2,681. Tested on a MKII +Drive UW.
   holds forever – the Machinedrum has no note-off. Further triggers or notes only change the pitch,
   without restarting or clicking (continuous retrigger). Stop it by muting the track or with the
   track level.
+- **The drone simply keeps running – it has no envelope of its own.** If you want one, use the
+  envelope on the **LFO page** of the X.20 firmware.
 - **Tonal:** PTCH follows the keyboard, MIDI notes and the tuning.
 - The output peaks around −9 dBFS on purpose, leaving headroom for the Machinedrum's own track
   filter with high resonance. Raise the track level if needed.
