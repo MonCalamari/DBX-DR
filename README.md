@@ -53,7 +53,7 @@ Default sound: PTCH 17 (≈ 74 Hz, about D), DTUN 40, DRIV 50, WARP 40, CUT 45, 
 
 This machine is built around a self-oscillating feedback loop and is pushed to the edge on
 purpose – that's the sound I want. In my own playing, even at extreme settings, it has been
-unproblematic on a decent system with a high-cut. Like any resonant, driven synth it can get loud,
+unproblematic on a decent system with a low-cut (high-pass filter). Like any resonant, driven synth it can get loud,
 so start at a sensible level and bring FDBK, RES and DRIV up gradually. As usual with open-source
 code, it comes without warranty (GPL).
 
